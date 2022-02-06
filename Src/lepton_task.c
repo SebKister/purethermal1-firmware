@@ -118,7 +118,7 @@ void AGC()
 				}
 				if (j %10 ==0)
 				{
-					current_buffer->lines.rgb[i].data.image_data[j].r = ;
+					current_buffer->lines.rgb[i].data.image_data[j].r = 0;
 					current_buffer->lines.rgb[i].data.image_data[j].g = 0;
 					current_buffer->lines.rgb[i].data.image_data[j].b = 40+i*3;
 				}
