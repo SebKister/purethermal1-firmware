@@ -86,6 +86,7 @@ static void print_telemetry_temps(telemetry_data_l2 *telemetry)
 }
 
 static lepton_buffer *current_buffer = NULL;
+static lepton_buffer AGC_buffer;
 
 float ctov(uint16_t temperature)
 {
@@ -104,26 +105,26 @@ void AGC()
 		for (uint8_t j = 0; j < FRAME_LINE_LENGTH; j++)
 		{
 			{
-				current_buffer->lines.rgb[i].data.image_data[j].r = 0;
-				current_buffer->lines.rgb[i].data.image_data[j].g = 0;
-				current_buffer->lines.rgb[i].data.image_data[j].b = 0;
+				AGC_buffer.lines.rgb[i].data.image_data[j].r = 0;
+				AGC_buffer.lines.rgb[i].data.image_data[j].g = 0;
+				AGC_buffer.lines.rgb[i].data.image_data[j].b = 0;
 
 				//if (current_buffer->lines.y16[i].data.image_data[j] > lowershow)
-				if (i == 10)
+				if (i % 10==0)
 				{
-					current_buffer->lines.rgb[i].data.image_data[j].r = 255;
-					current_buffer->lines.rgb[i].data.image_data[j].g = 255;
-					current_buffer->lines.rgb[i].data.image_data[j].b = 255;
-				}
-				if (j == 10)
-				{
-					current_buffer->lines.rgb[i].data.image_data[j].r = 255;
+					current_buffer->lines.rgb[i].data.image_data[j].r = 40+i*3;
 					current_buffer->lines.rgb[i].data.image_data[j].g = 0;
 					current_buffer->lines.rgb[i].data.image_data[j].b = 0;
 				}
+				if (j %10 ==0)
+				{
+					current_buffer->lines.rgb[i].data.image_data[j].r = ;
+					current_buffer->lines.rgb[i].data.image_data[j].g = 0;
+					current_buffer->lines.rgb[i].data.image_data[j].b = 40+i*3;
+				}
 			}
-			current_buffer->lines.rgb[i].header[0] = current_buffer->lines.y16[i].header[0];
-			current_buffer->lines.rgb[i].header[1] = current_buffer->lines.y16[i].header[1];
+			AGC_buffer.lines.rgb[i].header[0] = current_buffer->lines.y16[i].header[0];
+			AGC_buffer.lines.rgb[i].header[1] = current_buffer->lines.y16[i].header[1];
 		}
 	}
 }
@@ -332,13 +333,13 @@ void AGC()
 		{
 			static int row;
 
-			completed_buffer = current_buffer;
+			completed_buffer = 	 (transfer_14b) ? &AGC_buffer : current_buffer;
 			completed_frame_count = current_frame_count;
 
 			HAL_GPIO_TogglePin(SYSTEM_LED_GPIO_Port, SYSTEM_LED_Pin);
 
 			// apply agc on y16 data and send result in rgb
-
+/*
 			if (!g_format_y16)
 			{
 				for (row = 0; row < (IMAGE_NUM_LINES + g_telemetry_num_lines); row++)
@@ -352,7 +353,7 @@ void AGC()
 					PT_YIELD(pt);
 				}
 			}
-
+*/
 			if (!full(CIRC_BUF_HANDLE(completed_frames_buf)))
 				push(CIRC_BUF_HANDLE(completed_frames_buf), completed_buffer);
 		}
