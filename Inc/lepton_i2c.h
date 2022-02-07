@@ -4,6 +4,9 @@
 #include "LEPTON_ErrorCodes.h"
 #include "LEPTON_VID.h"
 
+typedef struct { const uint8_t colormap[256 * 3]; } colormap_t;
+extern const colormap_t colormap_ironblack ;
+
 HAL_StatusTypeDef agc_enable();
 HAL_StatusTypeDef set_reg(unsigned int reg);
 uint16_t read_reg(unsigned int reg);
