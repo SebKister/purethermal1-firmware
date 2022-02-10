@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include "stm32f4xx_hal.h"
 #include "usb_device.h"
+#include "LEPTON_ErrorCodes.h"
+#include "LEPTON_AGC.h"
 
 #include "pt.h"
 #include "lepton.h"
@@ -16,6 +18,7 @@
 
 extern volatile uint8_t g_lepton_type_3;
 extern struct uvc_streaming_control videoCommitControl;
+extern LEP_CAMERA_PORT_DESC_T hport_desc;
 
 lepton_buffer *completed_buffer;
 uint32_t completed_frame_count;
@@ -23,7 +26,8 @@ uint32_t completed_frame_count;
 uint8_t lepton_i2c_buffer[36];
 
 #define RING_SIZE (4)
-lepton_buffer lepton_buffers[RING_SIZE];
+lepton_buffer read_lepton_buffer;
+lepton_buffer lepton_AGC_buffers[RING_SIZE];
 
 lepton_buffer *completed_frames_buf[RING_SIZE] = {0};
 DECLARE_CIRC_BUF_HANDLE(completed_frames_buf);
@@ -55,15 +59,26 @@ lepton_buffer *dequeue_lepton_buffer()
 		return shift(CIRC_BUF_HANDLE(completed_frames_buf));
 }
 
+uint16_t ctov(uint16_t temperature)
+{
+	//for high gain
+	return temperature*100 + 27315;
+}
+
+
+uint16_t lowTh;
+
 void init_lepton_task()
 {
-	int i;
-	for (i = 0; i < RING_SIZE; i++)
-	{
-		lepton_buffers[i].number = i;
-		lepton_buffers[i].status = LEPTON_STATUS_OK;
-		DEBUG_PRINTF("Initialized lepton buffer %d @ %p\r\n", i, &lepton_buffers[i]);
-	}
+  int i;
+  for (i = 0; i < RING_SIZE; i++)
+  {
+    lepton_AGC_buffers[i].number = i;
+    lepton_AGC_buffers[i].status = LEPTON_STATUS_OK;
+    DEBUG_PRINTF("Initialized lepton buffer %d @ %p\r\n", i, &lepton_AGC_buffers[i]);
+  }
+
+  lowTh=ctov(30);
 }
 
 static float k_to_c(uint16_t unitsKelvin)
@@ -86,57 +101,127 @@ static void print_telemetry_temps(telemetry_data_l2 *telemetry)
 }
 
 static lepton_buffer *current_buffer = NULL;
-static lepton_buffer AGC_buffer;
+static lepton_buffer *current_AGC_buffer = NULL;
 
-float ctov(uint16_t temperature)
+// AGC Reference temperature in centi Kelvin
+
+static uint8_t AGCmethod=1;
+
+//method 3 zones
+static uint16_t miniTemp=1500+27315;
+static uint16_t startZone=3200+27315;
+static uint16_t endZone=4200+27315;
+static uint16_t maxTemp=6000+27315;
+
+
+//method ironblack
+static uint16_t midtempIB=3000+27315;
+static uint16_t lowtempIB=1600+27315;
+static uint16_t hightempIB=4000+27315;
+
+void applyAGC()
 {
-	//for high gain
-	return temperature*100 + 27315;
-}
-
-void AGC()
-{
-
-	uint16_t lowershow = ctov(30);
-
-	for (uint8_t i = 0; i < IMAGE_OFFSET_LINES + IMAGE_NUM_LINES; i++)
+	if (transferRGB)
 	{
+		
 
-		for (uint8_t j = 0; j < FRAME_LINE_LENGTH; j++)
+		for (int i = 0; i < IMAGE_NUM_LINES; i++)
 		{
-			{
-				AGC_buffer.lines.rgb[i].data.image_data[j].r = 0;
-				AGC_buffer.lines.rgb[i].data.image_data[j].g = 0;
-				AGC_buffer.lines.rgb[i].data.image_data[j].b = 0;
 
-				//if (current_buffer->lines.y16[i].data.image_data[j] > lowershow)
-				if (i % 10==0)
+			for (int j = 0; j < FRAME_LINE_LENGTH; j++)
+			{
+				if (AGCmethod == 0) // 3 zones
 				{
-					current_buffer->lines.rgb[i].data.image_data[j].r = 40+i*3;
-					current_buffer->lines.rgb[i].data.image_data[j].g = 0;
-					current_buffer->lines.rgb[i].data.image_data[j].b = 0;
+					current_AGC_buffer->lines.rgb[i].data.image_data[j].r = 0;
+					current_AGC_buffer->lines.rgb[i].data.image_data[j].g = 0;
+					current_AGC_buffer->lines.rgb[i].data.image_data[j].b = 0;
+
+					if (current_buffer->lines.y16[i].data.image_data[j] > miniTemp && current_buffer->lines.y16[i].data.image_data[j] < startZone)
+					{
+						float fact = (float)(current_buffer->lines.y16[i].data.image_data[j] - miniTemp) / (float)(startZone - miniTemp);
+
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].r = 0; // current_buffer->lines.rgb[i].data.image_data[j].r;
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].g = 0; // current_buffer->lines.rgb[i].data.image_data[j].g;
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].b = 30 + fact * 128;
+					}
+					else if (current_buffer->lines.y16[i].data.image_data[j] > startZone && current_buffer->lines.y16[i].data.image_data[j] < endZone)
+					{
+						float fact = (float)(current_buffer->lines.y16[i].data.image_data[j] - startZone) / (float)(endZone - startZone);
+
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].r = 0;				 // current_buffer->lines.rgb[i].data.image_data[j].r;
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].g = 90 + fact * 128; // current_buffer->lines.rgb[i].data.image_data[j].g;
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].b = 90 + fact * 128;
+					}
+					else if (current_buffer->lines.y16[i].data.image_data[j] > endZone && current_buffer->lines.y16[i].data.image_data[j] < maxTemp)
+					{
+						float fact = (float)(current_buffer->lines.y16[i].data.image_data[j] - endZone) / (float)(maxTemp - endZone);
+
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].r = 128 + fact * 128; // current_buffer->lines.rgb[i].data.image_data[j].r;
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].g = 0;				  // current_buffer->lines.rgb[i].data.image_data[j].g;
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].b = 0;
+					}
 				}
-				if (j %10 ==0)
+				else if (AGCmethod == 1) // IronBlack mapping
 				{
-					current_buffer->lines.rgb[i].data.image_data[j].r = 0;
-					current_buffer->lines.rgb[i].data.image_data[j].g = 0;
-					current_buffer->lines.rgb[i].data.image_data[j].b = 40+i*3;
+					current_AGC_buffer->lines.rgb[i].data.image_data[j].r = colormap_ironblack.colormap[0];
+					current_AGC_buffer->lines.rgb[i].data.image_data[j].g = colormap_ironblack.colormap[0 + 1];
+					current_AGC_buffer->lines.rgb[i].data.image_data[j].b = colormap_ironblack.colormap[0 + 2];
+
+					if (current_buffer->lines.y16[i].data.image_data[j] >= lowtempIB && current_buffer->lines.y16[i].data.image_data[j] < midtempIB)
+					{
+
+						uint16_t loc = 128 * (float)(current_buffer->lines.y16[i].data.image_data[j] - lowtempIB) / (float)(midtempIB - lowtempIB);
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].r = colormap_ironblack.colormap[loc*3];
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].g = colormap_ironblack.colormap[loc*3 + 1];
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].b = colormap_ironblack.colormap[loc*3 + 2];
+					}
+					else if (current_buffer->lines.y16[i].data.image_data[j] >= midtempIB && current_buffer->lines.y16[i].data.image_data[j] < hightempIB)
+					{
+
+						uint16_t loch =  128 *(float)(current_buffer->lines.y16[i].data.image_data[j] - midtempIB) / (float)(hightempIB - midtempIB);
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].r = colormap_ironblack.colormap[3*128+loch*3];
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].g = colormap_ironblack.colormap[3*128+loch*3 + 1];
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].b = colormap_ironblack.colormap[3*128+loch*3 + 2];
+					}
+					else
+					{
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].r = colormap_ironblack.colormap[255 * 3];
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].g = colormap_ironblack.colormap[255 * 3 + 1];
+						current_AGC_buffer->lines.rgb[i].data.image_data[j].b = colormap_ironblack.colormap[255 * 3 + 2];
+					}
 				}
 			}
-			AGC_buffer.lines.rgb[i].header[0] = current_buffer->lines.y16[i].header[0];
-			AGC_buffer.lines.rgb[i].header[1] = current_buffer->lines.y16[i].header[1];
 		}
+		current_AGC_buffer->number = current_buffer->number;
+		current_AGC_buffer->segment = current_buffer->segment;
+		current_AGC_buffer->status = current_buffer->status;
+	}
+	else
+	{
+		for (int i = 0; i < IMAGE_NUM_LINES; i++)
+		{
+			for (int j = 0; j < FRAME_LINE_LENGTH; j++)
+			{
+
+				current_AGC_buffer->lines.y16[i].data.image_data[j] = current_buffer->lines.y16[i].data.image_data[j];
+			}
+		}
+		current_AGC_buffer->number = current_buffer->number;
+		current_AGC_buffer->segment = current_buffer->segment;
+		current_AGC_buffer->status = current_buffer->status;
 	}
 }
 
-	void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-	{
-		static int current_buffer_index = 0;
-		lepton_buffer *buffer = &lepton_buffers[current_buffer_index];
-		current_buffer = buffer;
-		current_buffer_index = ((current_buffer_index + 1) % RING_SIZE);
-		HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
-	}
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	static int current_buffer_index = 0;
+	lepton_buffer *buffer = &read_lepton_buffer;
+	current_buffer = buffer;
+	lepton_buffer *bufferAGC = &lepton_AGC_buffers[current_buffer_index];
+	current_AGC_buffer = bufferAGC;
+	current_buffer_index = ((current_buffer_index + 1) % RING_SIZE);
+	HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
+}
+
 
 	PT_THREAD(lepton_task(struct pt * pt))
 	{
@@ -194,20 +279,22 @@ void AGC()
 					disable_telemetry();
 				disable_lepton_agc();
 				enable_raw14();
-				transfer_14b = 0;
+				transferRGB=0;
 			}
 			else
 			{
-				//	disable_telemetry();
-				//	enable_lepton_agc();
-				//	enable_rgb888((LEP_PCOLOR_LUT_E)-1); // -1 means attempt to continue using the current palette (PcolorLUT)
-				// get the y16 format and then apply custom agc and transfer as rgb888
-					disable_telemetry();
-					disable_lepton_agc();
+				disable_telemetry();
+				disable_lepton_agc();
 				enable_raw14();
-				//enable_rgb888((LEP_PCOLOR_LUT_E)-1);
-				transfer_14b = 1;
+				transferRGB=1;
+				//enable_rgb888((LEP_PCOLOR_LUT_E)-1); // -1 means attempt to continue using the current palette (PcolorLUT)
 			}
+
+			// Reinitialize limits AGC
+			LEP_SetAgcHeqClipLimitHigh(&hport_desc, 4000 + 27315);
+			LEP_SetAgcHeqClipLimitLow(&hport_desc, 1600 + 27315);
+			LEP_SetAgcHeqMidPoint(&hport_desc, 3000 + 27315);
+
 			has_started_a_stream = 1;
 
 			// flush out any old data
@@ -240,7 +327,7 @@ void AGC()
 
 		current_frame_count++;
 
-		if (g_format_y16 || transfer_14b)
+		if (g_format_y16 || transferRGB)
 		{
 			current_segment = ((current_buffer->lines.y16[IMAGE_OFFSET_LINES + 20].header[0] & 0x7000) >> 12);
 			last_end_line = (current_buffer->lines.y16[IMAGE_OFFSET_LINES + IMAGE_NUM_LINES + g_telemetry_num_lines - 1].header[0] & 0x00ff);
@@ -278,7 +365,9 @@ void AGC()
 					transferring_timer = HAL_GetTick();
 					PT_YIELD_UNTIL(pt, current_buffer->status != LEPTON_STATUS_TRANSFERRING || ((HAL_GetTick() - transferring_timer) > 200));
 
-					last_header = ((g_format_y16 || transfer_14b) ? current_buffer->lines.y16[0].header[0] : current_buffer->lines.rgb[0].header[0]);
+					last_header = ((g_format_y16 || transferRGB) ?
+							current_buffer->lines.y16[0].header[0] :
+							current_buffer->lines.rgb[0].header[0]);
 
 				} while (current_buffer->status == LEPTON_STATUS_OK && (last_header & 0x0f00) == 0x0f00);
 
@@ -310,7 +399,7 @@ void AGC()
 
 			if (g_telemetry_num_lines > 0 && g_lepton_type_3 == 0)
 			{
-				if (g_format_y16 || transfer_14b)
+				if (g_format_y16 || transferRGB)
 					print_telemetry_temps(&current_buffer->lines.y16[TELEMETRY_OFFSET_LINES].data.telemetry_data);
 				else
 					print_telemetry_temps(&current_buffer->lines.rgb[TELEMETRY_OFFSET_LINES].data.telemetry_data);
@@ -324,23 +413,19 @@ void AGC()
 			last_logged_count = current_frame_count;
 		}
 
-		//Apply manual AGC // Maybe apply on whole frame
-		if (transfer_14b)
-			AGC();
 
+	applyAGC();
 		// Need to update completed buffer for clients?
 		if (g_lepton_type_3 == 0 || (current_segment > 0 && current_segment <= 4))
 		{
 			static int row;
 
-			completed_buffer = 	 (transfer_14b) ? &AGC_buffer : current_buffer;
+			completed_buffer = current_AGC_buffer;
 			completed_frame_count = current_frame_count;
 
 			HAL_GPIO_TogglePin(SYSTEM_LED_GPIO_Port, SYSTEM_LED_Pin);
 
-			// apply agc on y16 data and send result in rgb
-/*
-			if (!g_format_y16)
+		/*	if (!g_format_y16)
 			{
 				for (row = 0; row < (IMAGE_NUM_LINES + g_telemetry_num_lines); row++)
 				{
@@ -357,8 +442,24 @@ void AGC()
 			if (!full(CIRC_BUF_HANDLE(completed_frames_buf)))
 				push(CIRC_BUF_HANDLE(completed_frames_buf), completed_buffer);
 		}
-
+		if (current_frame_count % 100 == 0)
+		{
+			LEP_GetAgcHeqClipLimitHigh(&hport_desc, &hightempIB);
+			
+		}
+		if (current_frame_count % 100 == 30)
+		{
+			
+			LEP_GetAgcHeqClipLimitLow(&hport_desc, &lowtempIB);
+		
+		}
+		if (current_frame_count % 100 == 60)
+		{
+		
+			LEP_GetAgcHeqMidPoint(&hport_desc, &midtempIB);
+		}
 		current_buffer = NULL;
+		current_AGC_buffer=NULL;
 	}
 	PT_END(pt);
 }

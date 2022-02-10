@@ -43,7 +43,7 @@ void lepton_transfer(lepton_buffer *buf, int nlines)
   // DEBUG_PRINTF("Transfer starting: %p@%p\r\n", buf, packet);
 
   int packet_size = FRAME_HEADER_LENGTH +
-		  (((g_format_y16 || transfer_14b) ? sizeof(uint16_t) : sizeof(rgb_t)) * FRAME_LINE_LENGTH) / sizeof(uint16_t);
+		  (((g_format_y16 || transferRGB) ? sizeof(uint16_t) : sizeof(rgb_t)) * FRAME_LINE_LENGTH) / sizeof(uint16_t);
   status = setup_lepton_spi_rx(&hspi2, buf->lines.data, packet_size * nlines);
 
   if (status != HAL_OK)
